@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no">
+<title>AI数字人导游 - Live2D</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1a6d4c;overflow:hidden;width:100vw;height:100vh;display:flex;justify-content:center;align-items:center}
+#live2d-canvas{width:100%;height:100%;display:block}
+.status{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);color:#fff;font-size:13px;background:rgba(0,0,0,0.5);padding:6px 16px;border-radius:20px;pointer-events:none;z-index:10;transition:opacity 0.3s}
+</style>
+</head>
+<body>
+<div id="live2d-canvas"></div>
+<div class="status" id="status">初始化中...</div>
+
+<!-- 必须按此顺序加载！ -->
+<!-- 1. PixiJS -->
+<script src="/live2d-viewer/static/pixi.min.js"></script>
+<!-- 2. Cubism 4 Core -->
+<script src="/live2d-viewer/static/live2dcubismcore.min.js"></script>
+<!-- 3. pixi-live2d Cubism4 支持 -->
+<script src="/live2d-viewer/static/cubism4.min.js"></script>
+<!-- 4. pixi-live2d 主库 -->
+<script src="/live2d-viewer/static/index.min.js"></script>
+
+<script>
+(function(){
+  var statusEl = document.getElementById('status');
+  function log(msg){ console.log('[Live2D-Web]',msg); statusEl.textContent=msg; statusEl.style.opacity='1' }
+
+  // 检查依赖
+  if(typeof PIXI==='undefined'){ log('错误: PixiJS 未加载!'); return }
+  log('PixiJS v'+PIXI.VERSION);
+
+  if(typeof Live2DCubismCore==='undefined'){ log('错误: CubismCore 未加载!'); return }
+  log('CubismCore OK');
+
+  if(!PIXI.live2d){ log('错误: pixi-live2d-display 未加载!'); return }
+  log('pixi-live2d-display OK');
+
+  // 创建 PIXI Application
+  log('创建画布...');
+  var app = new PIXI.Application({
+    resizeTo: window,
+    backgroundAlpha: 0,
+    antialias: true,
+    resolution: window.devicePixelRatio || 2,
+    autoDensity: true
+  });
+  document.getElementById('live2d-canvas').appendChild(app.view);
+  log('画布创建完成');
+
+  // 加载模型
+  var modelUrl = '/static/model/model.model3.json';
+  log('加载: '+modelUrl);
+
+  PIXI.live2d.Live2DModel.from(modelUrl, { autoInteract: false }).then(function(model){
+    log('模型加载成功!');
+    app.stage.addChild(model);
+
+    // 自适应缩放 & 居中（补偿模型原点偏移）
+    function fitModel(){
+      var mw = model.internalModel.width;
+      var mh = model.internalModel.height;
+      var sw = app.screen.width;
+      var sh = app.screen.height;
+      var s = Math.min(sw/mw, sh/mh) * 0.85;
+      model.scale.set(s);
+      model.x = sw/2 - (mw * s) / 2;
+      model.y = sh/2 - (mh * s) / 2;
+      console.log('[Live2D-Web] fit: scale='+s.toFixed(3)+' model='+mw+'x'+mh+' center='+model.x.toFixed(0)+','+model.y.toFixed(0));
+    }
+    fitModel();
+    window.addEventListener('resize', fitModel);
+
+    log('就绪');
+    setTimeout(function(){ statusEl.style.opacity='0' }, 1000);
+
+    try{ wx&&wx.miniProgram&&wx.miniProgram.postMessage({data:{type:'ready'}}) }catch(e){}
+
+    // 眨眼+呼吸
+    var blinkTimer=0,blinkPhase=0,blinkFrame=0,breathPhase=0;
+    app.ticker.add(function(){
+      breathPhase=(breathPhase+0.03)%(Math.PI*2);
+      model.internalModel.coreModel.setParameterValueById('ParamBreath',(Math.sin(breathPhase)+1)/2);
+      blinkTimer++;
+      if(blinkPhase===0){if(blinkTimer>60*(3+Math.random()*3)){blinkTimer=0;blinkPhase=1;blinkFrame=0}}
+      else if(blinkPhase===1){blinkFrame++;var t=Math.min(1,blinkFrame/4);model.internalModel.coreModel.setParameterValueById('ParamEyeLOpen',1-t);model.internalModel.coreModel.setParameterValueById('ParamEyeROpen',1-t);if(blinkFrame>=4){blinkPhase=2;blinkFrame=0}}
+      else if(blinkPhase===2){blinkFrame++;model.internalModel.coreModel.setParameterValueById('ParamEyeLOpen',0);model.internalModel.coreModel.setParameterValueById('ParamEyeROpen',0);if(blinkFrame>=1){blinkPhase=3;blinkFrame=0}}
+      else if(blinkPhase===3){blinkFrame++;var t2=Math.min(1,blinkFrame/4);model.internalModel.coreModel.setParameterValueById('ParamEyeLOpen',t2);model.internalModel.coreModel.setParameterValueById('ParamEyeROpen',t2);if(blinkFrame>=4){blinkPhase=0;blinkTimer=0}}
+    });
+
+    // 通信接口
+    window._live2dModel=model;
+    window.setEmotion=function(e){var m=model.internalModel.coreModel;m.setParameterValueById('ParamEyeLSmile',0);m.setParameterValueById('ParamEyeRSmile',0);m.setParameterValueById('ParamBrowLY',0);m.setParameterValueById('ParamBrowRY',0);switch(e){case'happy':m.setParameterValueById('ParamEyeLSmile',0.8);m.setParameterValueById('ParamEyeRSmile',0.8);m.setParameterValueById('ParamBrowLY',-0.5);m.setParameterValueById('ParamBrowRY',-0.5);break;case'surprised':m.setParameterValueById('ParamBrowLY',-0.8);m.setParameterValueById('ParamBrowRY',-0.8);break;case'concerned':case'apologetic':m.setParameterValueById('ParamBrowLY',0.5);m.setParameterValueById('ParamBrowRY',0.5);break;case'curious':m.setParameterValueById('ParamBrowLY',-0.3);m.setParameterValueById('ParamBrowRY',-0.3);break;case'thinking':m.setParameterValueById('ParamBrowLY',0.2);m.setParameterValueById('ParamBrowRY',-0.3);break}};
+    window.setMouthOpen=function(v){model.internalModel.coreModel.setParameterValueById('ParamMouthOpenY',v)};
+    var ms=[1.0,0.65,0.35,0.65,1.0,0.0,0.35,0.65],mi=0,mt=null;
+    window.startSpeaking=function(){if(mt)return;mi=0;mt=setInterval(function(){window.setMouthOpen(ms[mi%ms.length]);mi++},120)};
+    window.stopSpeaking=function(){if(mt){clearInterval(mt);mt=null}window.setMouthOpen(0)};
+
+  }).catch(function(err){
+    log('失败: '+err.message);
+    console.error('[Live2D-Web]',err);
+  });
+
+})();
+</script>
+</body>
+</html>
