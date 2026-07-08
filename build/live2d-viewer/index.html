@@ -371,11 +371,12 @@ body{
 
   function sendAudio(blob){
     isThinking=true;$inp.disabled=true;$voice.disabled=true;$send.disabled=true;
-    setEmotion('curious');addMsg('user','(语音消息)');showTyping();
+    setEmotion('curious');showTyping();
     var fd=new FormData();fd.append('audio',blob,'recording.webm');
     fetch(API+'/qa/ask',{method:'POST',body:fd}).then(function(r){return r.json()}).then(function(res){
-      hideTyping();var d=(res&&res.data)||{};var q=d.question_text||'';var a=d.answer_text||'抱歉,我没听清楚~';
-      if(q)addMsg('user',q);addMsg('assistant',a);setEmotion('happy');
+      hideTyping();var d=(res&&res.data)||{};var q=d.question_text||'';var a=d.answer_text||'网络开小差了~';
+      if(q){addMsg('user',q)}
+      addMsg('assistant',a);setEmotion(q?'happy':'concerned');
       isThinking=false;
       $inp.disabled=false;$voice.disabled=false;updateSendBtn();
       startSpeakWithDuration(a,d.answer_audio_base64);
