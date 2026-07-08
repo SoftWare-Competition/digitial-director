@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no">
+<title>AI数字人导游 - Live2D</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,sans-serif;
+  background:#1a6d4c;width:100vw;height:100vh;
+  display:flex;flex-direction:column;overflow:hidden;
+  -webkit-user-select:none;user-select:none;
+}
+.char-area{height:45vh;background:linear-gradient(180deg,#1a6d4c 0%,#228b5e 100%);position:relative;flex-shrink:0}
+.char-area canvas{display:block;width:100%;height:100%}
+.char-status{position:absolute;bottom:10px;left:50%;transform:translateX(-50%);color:#fff;font-size:12px;background:rgba(0,0,0,0.4);padding:4px 14px;border-radius:12px;pointer-events:none;z-index:5;transition:opacity .3s}
+.chat-area{flex:1;background:#f0f2f5;overflow-y:auto;padding:12px 16px;-webkit-overflow-scrolling:touch}
+.chat-empty{display:flex;flex-direction:column;align-items:center;padding-top:40px;color:#999}
+.chat-empty .icon{font-size:48px;margin-bottom:12px}
+.chat-empty .text{font-size:15px;margin-bottom:6px}
+.chat-empty .hint{font-size:13px;color:#bbb}
+.msg-row{display:flex;margin-bottom:14px}
+.msg-row.user{justify-content:flex-end}
+.msg-row.assistant{justify-content:flex-start}
+.msg-bubble{max-width:78%;padding:10px 14px;border-radius:14px;font-size:14px;line-height:1.6;word-break:break-word;white-space:pre-wrap}
+.msg-bubble.user{background:#1a6d4c;color:#fff;border-bottom-right-radius:4px}
+.msg-bubble.assistant{background:#fff;color:#333;border-bottom-left-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.typing-dots{display:flex;gap:4px;padding:4px 0}
+.typing-dots span{width:6px;height:6px;border-radius:50%;background:#aaa;animation:blink 1.4s infinite}
+.typing-dots span:nth-child(2){animation-delay:.2s}
+.typing-dots span:nth-child(3){animation-delay:.4s}
+@keyframes blink{0%,60%,100%{opacity:.2}30%{opacity:1}}
+.bottom-bar{background:#fff;border-top:1px solid #eee;padding:10px 14px;padding-bottom:calc(10px + env(safe-area-inset-bottom));flex-shrink:0}
+.text-row{display:flex;gap:10px;align-items:center;margin-bottom:10px}
+.text-inp{flex:1;height:36px;background:#f5f5f5;border:none;outline:none;border-radius:18px;padding:0 14px;font-size:14px;color:#333}
+.text-inp::placeholder{color:#bbb}
+.btn-send{width:56px;height:32px;line-height:32px;text-align:center;background:#ccc;color:#fff;border-radius:16px;font-size:13px;cursor:pointer;border:none;transition:background .2s}
+.btn-send.active{background:#1a6d4c}
+.btn-send:disabled{opacity:.5}
+.voice-row{width:100%}
+.btn-voice{width:100%;height:44px;line-height:44px;text-align:center;background:#1a6d4c;color:#fff;border-radius:22px;font-size:15px;cursor:pointer;border:none;display:flex;align-items:center;justify-content:center;gap:8px}
+.btn-voice.recording{background:#e74c3c;animation:pulse .8s infinite}
+.btn-voice:disabled{background:#ccc;color:#999}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.8}}
+</style>
+</head>
+<body>
+<div class="char-area" id="charArea">
+  <div class="char-status" id="status">初始化中...</div>
+</div>
+
+<div class="chat-area" id="chatArea">
+  <div class="chat-empty" id="chatEmpty">
+    <div class="icon">🎙️</div>
+    <div class="text">按住下方按钮对我说话吧~</div>
+    <div class="hint">例如: 灵山大佛有多高?</div>
+  </div>
+</div>
+
+<div class="bottom-bar">
+  <div class="text-row">
+    <input class="text-inp" id="textInp" placeholder="输入问题..." disabled>
+    <button class="btn-send" id="btnSend" disabled>发送</button>
+  </div>
+  <div class="voice-row">
+    <button class="btn-voice" id="btnVoice" disabled>
+      <span id="voiceIcon">🎤</span><span id="voiceText">按住说话</span>
+    </button>
+  </div>
+</div>
+
+<script src="/live2d-viewer/static/pixi.min.js"></script>
+<script src="/live2d-viewer/static/live2dcubismcore.min.js"></script>
+<script src="/live2d-viewer/static/cubism4.min.js"></script>
+<script src="/live2d-viewer/static/index.min.js"></script>
+
+<script>
+(function(){
+  var API='/api/v1';
+  var MODEL_URL='/static/model/model.model3.json';
+  var $status=document.getElementById('status');
+  var $chat=document.getElementById('chatArea');
+  var $empty=document.getElementById('chatEmpty');
+  var $inp=document.getElementById('textInp');
+  var $send=document.getElementById('btnSend');
+  var $voice=document.getElementById('btnVoice');
+  var $vIcon=document.getElementById('voiceIcon');
+  var $vText=document.getElementById('voiceText');
+  var app,model,isThinking=false,isRecording=false;
+  var mediaRecorder=null,audioChunks=[];
+
+  function log(m){console.log('[QA]',m);$status.textContent=m;$status.style.opacity='1'}
+
+  log('加载 PixiJS...');
+  if(typeof PIXI==='undefined'){log('PixiJS 未加载!');return}
+  log('PixiJS v'+PIXI.VERSION);
+  if(typeof Live2DCubismCore==='undefined'){log('CubismCore 未加载!');return}
+  if(!PIXI.live2d){log('pixi-live2d 未加载!');return}
+
+  try{
+    app=new PIXI.Application({
+      resizeTo:document.getElementById('charArea'),
+      backgroundAlpha:0,antialias:true,
+      resolution:window.devicePixelRatio||2,autoDensity:true,
+      preserveDrawingBuffer:true
+    });
+  }catch(e){log('PIXI创建失败:'+e.message);return}
+  document.getElementById('charArea').appendChild(app.view);
+  log('Renderer: '+app.renderer.type+' size:'+app.screen.width+'x'+app.screen.height);
+  log('加载模型...');
+  PIXI.live2d.Live2DModel.from(MODEL_URL,{autoInteract:false}).then(function(m){
+    model=m;
+    // 修复移动端黑色渲染:确保材质使用正确混合模式
+    model.alpha=1;
+    model.blendMode=0;
+    app.stage.addChild(model);
+    log('Model loaded successfully');
+
+    // 交互状态
+    var baseScale=1, scaleMin=0.4, scaleMax=2.5;
+    var offsetX=0, offsetY=0;
+    var dragStartX=0, dragStartY=0, dragOffX=0, dragOffY=0, isDragging=false;
+    var pinchDist0=0, pinchScale0=1;
+    var lastTapTime=0;
+
+    function getModelSize(){
+      var iw=0,ih=0;
+      try{
+        iw=model.internalModel&&model.internalModel.width||model.width||500;
+        ih=model.internalModel&&model.internalModel.height||model.height||500;
+      }catch(e){iw=500;ih=500}
+      return {w:iw,h:ih};
+    }
+
+    function applyTransform(){
+      if(!model)return;
+      var sz=getModelSize();
+      var sw=app.screen.width, sh=app.screen.height;
+      var fitScale=Math.min(sw/sz.w,sh/sz.h)*0.8;
+      var s=fitScale*baseScale;
+      model.scale.set(s);
+      model.x=sw/2-(sz.w*s)/2+offsetX;
+      model.y=sh/2-(sz.h*s)/2+offsetY;
+    }
+
+    function resetView(){
+      baseScale=1;offsetX=0;offsetY=0;
+      applyTransform();
+    }
+
+    applyTransform();
+    window.addEventListener('resize',applyTransform);
+
+    // ===== 交互事件 =====
+    var charArea=document.getElementById('charArea');
+    var canvasEl=app.view;
+
+    // 鼠标滚轮缩放
+    canvasEl.addEventListener('wheel',function(e){
+      e.preventDefault();
+      var delta=e.deltaY>0?0.9:1.1;
+      var newScale=Math.min(scaleMax,Math.max(scaleMin,baseScale*delta));
+      // 以鼠标位置为缩放中心
+      var rect=canvasEl.getBoundingClientRect();
+      var mx=e.clientX-rect.left, my=e.clientY-rect.top;
+      var oldS=baseScale;
+      baseScale=newScale;
+      offsetX=(offsetX-mx+app.screen.width/2)*(newScale/oldS)+mx-app.screen.width/2;
+      offsetY=(offsetY-my+app.screen.height/2)*(newScale/oldS)+my-app.screen.height/2;
+      applyTransform();
+    },{passive:false});
+
+    // 双击重置
+    canvasEl.addEventListener('dblclick',function(e){
+      e.preventDefault();
+      resetView();
+    });
+
+    // 触摸事件
+    canvasEl.addEventListener('touchstart',function(e){
+      if(e.touches.length===1){
+        // 单指拖动
+        isDragging=true;
+        dragStartX=e.touches[0].clientX;
+        dragStartY=e.touches[0].clientY;
+        dragOffX=offsetX; dragOffY=offsetY;
+        lastTapTime=Date.now();
+      }else if(e.touches.length===2){
+        // 双指缩放
+        isDragging=false;
+        var dx=e.touches[0].clientX-e.touches[1].clientX;
+        var dy=e.touches[0].clientY-e.touches[1].clientY;
+        pinchDist0=Math.sqrt(dx*dx+dy*dy);
+        pinchScale0=baseScale;
+      }
+    },{passive:false});
+
+    canvasEl.addEventListener('touchmove',function(e){
+      e.preventDefault();
+      if(e.touches.length===1&&isDragging){
+        offsetX=dragOffX+(e.touches[0].clientX-dragStartX);
+        offsetY=dragOffY+(e.touches[0].clientY-dragStartY);
+        applyTransform();
+      }else if(e.touches.length===2){
+        var dx=e.touches[0].clientX-e.touches[1].clientX;
+        var dy=e.touches[0].clientY-e.touches[1].clientY;
+        var dist=Math.sqrt(dx*dx+dy*dy);
+        if(pinchDist0>0){
+          var newScale=Math.min(scaleMax,Math.max(scaleMin,pinchScale0*(dist/pinchDist0)));
+          baseScale=newScale;
+          applyTransform();
+        }
+      }
+    },{passive:false});
+
+    canvasEl.addEventListener('touchend',function(e){
+      // 双击检测
+      var now=Date.now();
+      if(now-lastTapTime<300&&e.touches.length===0&&!isDragging){
+        resetView();
+      }
+      isDragging=false;
+    });
+
+    // 鼠标拖动(桌面端)
+    canvasEl.addEventListener('mousedown',function(e){
+      isDragging=true;
+      dragStartX=e.clientX; dragStartY=e.clientY;
+      dragOffX=offsetX; dragOffY=offsetY;
+    });
+    canvasEl.addEventListener('mousemove',function(e){
+      if(!isDragging)return;
+      offsetX=dragOffX+(e.clientX-dragStartX);
+      offsetY=dragOffY+(e.clientY-dragStartY);
+      applyTransform();
+    });
+    canvasEl.addEventListener('mouseup',function(){isDragging=false});
+    canvasEl.addEventListener('mouseleave',function(){isDragging=false});
+
+    // 暴露控制方法
+    window.zoomIn=function(){baseScale=Math.min(scaleMax,baseScale*1.2);applyTransform()};
+    window.zoomOut=function(){baseScale=Math.max(scaleMin,baseScale*0.8);applyTransform()};
+    window.resetView=resetView;
+
+    log('就绪');
+    setTimeout(function(){$status.style.opacity='0'},1500);
+    enableUI();
+
+    // 眨眼+呼吸
+    var bt=0,bp=0,bf=0,bph=0;
+    app.ticker.add(function(){
+      bph=(bph+0.03)%(Math.PI*2);
+      m.internalModel.coreModel.setParameterValueById('ParamBreath',(Math.sin(bph)+1)/2);
+      bt++;
+      if(bp===0){if(bt>60*(3+Math.random()*3)){bt=0;bp=1;bf=0}}
+      else if(bp===1){bf++;var t=Math.min(1,bf/4);
+        m.internalModel.coreModel.setParameterValueById('ParamEyeLOpen',1-t);
+        m.internalModel.coreModel.setParameterValueById('ParamEyeROpen',1-t);
+        if(bf>=4){bp=2;bf=0}}
+      else if(bp===2){bf++;
+        m.internalModel.coreModel.setParameterValueById('ParamEyeLOpen',0);
+        m.internalModel.coreModel.setParameterValueById('ParamEyeROpen',0);
+        if(bf>=1){bp=3;bf=0}}
+      else if(bp===3){bf++;var t2=Math.min(1,bf/4);
+        m.internalModel.coreModel.setParameterValueById('ParamEyeLOpen',t2);
+        m.internalModel.coreModel.setParameterValueById('ParamEyeROpen',t2);
+        if(bf>=4){bp=0;bt=0}}
+    });
+
+    // 全局接口
+    window._live2dModel=model;
+    window.setEmotion=function(e){
+      var c=model.internalModel.coreModel;
+      c.setParameterValueById('ParamEyeLSmile',0);c.setParameterValueById('ParamEyeRSmile',0);
+      c.setParameterValueById('ParamBrowLY',0);c.setParameterValueById('ParamBrowRY',0);
+      switch(e){
+        case'happy':c.setParameterValueById('ParamEyeLSmile',0.8);c.setParameterValueById('ParamEyeRSmile',0.8);c.setParameterValueById('ParamBrowLY',-0.5);c.setParameterValueById('ParamBrowRY',-0.5);break;
+        case'surprised':c.setParameterValueById('ParamBrowLY',-0.8);c.setParameterValueById('ParamBrowRY',-0.8);break;
+        case'concerned':case'apologetic':c.setParameterValueById('ParamBrowLY',0.5);c.setParameterValueById('ParamBrowRY',0.5);break;
+        case'curious':c.setParameterValueById('ParamBrowLY',-0.3);c.setParameterValueById('ParamBrowRY',-0.3);break;
+        case'thinking':c.setParameterValueById('ParamBrowLY',0.2);c.setParameterValueById('ParamBrowRY',-0.3);break;
+      }
+    };
+    var ms=[1.0,0.65,0.35,0.65,1.0,0.0,0.35,0.65],mi=0,mt=null;
+    window.setMouth=function(v){model.internalModel.coreModel.setParameterValueById('ParamMouthOpenY',v)};
+    window.startSpeak=function(){if(mt)return;mi=0;mt=setInterval(function(){window.setMouth(ms[mi%ms.length]);mi++},120)};
+    window.stopSpeak=function(){if(mt){clearInterval(mt);mt=null}window.setMouth(0)};
+
+    try{wx&&wx.miniProgram&&wx.miniProgram.postMessage({data:{type:'ready'}})}catch(_){}
+
+  }).catch(function(e){log('失败:'+e.message);console.error(e)});
+
+  // ===== 问答 UI =====
+  function enableUI(){$inp.disabled=false;$voice.disabled=false;updateSendBtn()}
+  function addMsg(role,text){
+    if($empty){$empty.remove();$empty=null}
+    var row=document.createElement('div');row.className='msg-row '+role;
+    var bub=document.createElement('div');bub.className='msg-bubble '+role;bub.textContent=text;
+    row.appendChild(bub);$chat.appendChild(row);$chat.scrollTop=$chat.scrollHeight;
+  }
+  function showTyping(){
+    if($empty){$empty.remove();$empty=null}
+    var row=document.createElement('div');row.className='msg-row assistant';row.id='typingRow';
+    var dots=document.createElement('div');dots.className='msg-bubble assistant';
+    dots.innerHTML='<div class=\"typing-dots\"><span></span><span></span><span></span></div>';
+    row.appendChild(dots);$chat.appendChild(row);$chat.scrollTop=$chat.scrollHeight;
+  }
+  function hideTyping(){var tr=document.getElementById('typingRow');if(tr)tr.remove()}
+
+  $inp.addEventListener('input',updateSendBtn);
+  $inp.addEventListener('keydown',function(e){if(e.key==='Enter')sendText()});
+  $send.addEventListener('click',sendText);
+
+  function updateSendBtn(){
+    var v=$inp.value.trim();
+    $send.className='btn-send'+(v?' active':'');
+    $send.disabled=!v||isThinking;
+  }
+
+  function sendText(){
+    var text=$inp.value.trim();
+    if(!text||isThinking)return;
+    $inp.value='';updateSendBtn();
+    isThinking=true;$inp.disabled=true;$voice.disabled=true;$send.disabled=true;
+    setEmotion('curious');addMsg('user',text);showTyping();
+    var fd=new FormData();
+    fd.append('audio',new Blob([new Uint8Array(500)],{type:'audio/webm'}),'empty.webm');
+    fd.append('text',text);
+    fetch(API+'/qa/ask',{method:'POST',body:fd}).then(function(r){return r.json()}).then(function(res){
+      hideTyping();var d=(res&&res.data)||{};var a=d.answer_text||'抱歉,我暂时无法回答这个问题~';
+      addMsg('assistant',a);setEmotion('happy');
+      isThinking=false;
+      $inp.disabled=false;$voice.disabled=false;updateSendBtn();
+      startSpeakWithDuration(a,d.answer_audio_base64);
+    }).catch(function(e){hideTyping();console.error(e);addMsg('assistant','网络不太稳定,请稍后再试~');resetAfterSpeak()});
+  }
+
+  function initSpeechAPI(){
+    var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+    if(!SR){console.log('[Voice] Web Speech API unavailable');return false}
+    speechRecognition=new SR();
+    speechRecognition.lang='zh-CN';
+    speechRecognition.interimResults=false;
+    speechRecognition.maxAlternatives=1;
+    speechRecognition.onresult=function(e){
+      var text=e.results[0][0].transcript.trim();
+      console.log('[Voice] result:',text);
+      if(text){onVoiceText(text)}
+    };
+    speechRecognition.onerror=function(e){
+      console.warn('[Voice] error:',e.error);
+      stopRecord();
+    };
+    speechRecognition.onend=function(){stopRecord()};
+    console.log('[Voice] Web Speech API ready');
+    return true;
+  }
+
+  function startRecord(){
+    if(isRecording||isThinking)return;
+    isRecording=true;$voice.classList.add('recording');
+    $vIcon.textContent='🔴';$vText.textContent='松开发送';
+
+    if(speechRecognition||initSpeechAPI()){
+      try{speechRecognition.start()}catch(e){console.warn('[Voice] start failed:',e);stopRecord();return}
+      return
+    }
+
+    if(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia){
+      navigator.mediaDevices.getUserMedia({audio:true}).then(function(stream){
+        audioChunks=[];
+        mediaRecorder=new MediaRecorder(stream,{mimeType:'audio/webm'});
+        mediaRecorder.ondataavailable=function(e){if(e.data.size>0)audioChunks.push(e.data)};
+        mediaRecorder.onstop=function(){
+          stream.getTracks().forEach(function(t){t.stop()});
+          if(audioChunks.length>0){sendAudio(new Blob(audioChunks,{type:'audio/webm'}))}
+        };
+        mediaRecorder.start();
+      }).catch(function(e){console.warn('mic unavailable:',e);try{wx&&wx.miniProgram&&wx.miniProgram.postMessage({data:{type:'record_start'}})}catch(_){}});
+    }else{try{wx&&wx.miniProgram&&wx.miniProgram.postMessage({data:{type:'record_start'}})}catch(_){}}
+  }
+
+  function stopRecord(){
+    if(!isRecording)return;
+    isRecording=false;$voice.classList.remove('recording');
+    $vIcon.textContent='🎤';$vText.textContent='按住说话';
+    if(speechRecognition){try{speechRecognition.stop()}catch(_){}}
+    if(mediaRecorder&&mediaRecorder.state==='recording'){mediaRecorder.stop();mediaRecorder=null}
+    else{try{wx&&wx.miniProgram&&wx.miniProgram.postMessage({data:{type:'record_stop'}})}catch(_){}}
+  }
+
+  $voice.addEventListener('touchstart',function(e){e.preventDefault();startRecord()});
+  $voice.addEventListener('touchend',function(e){e.preventDefault();stopRecord()});
+  $voice.addEventListener('touchcancel',stopRecord);
+  $voice.addEventListener('mousedown',function(e){e.preventDefault();startRecord()});
+  $voice.addEventListener('mouseup',stopRecord);
+  $voice.addEventListener('mouseleave',function(){if(isRecording)stopRecord()});
+
+  function onVoiceText(text){
+    if(!text||isThinking)return;
+    isThinking=true;$inp.disabled=true;$voice.disabled=true;$send.disabled=true;
+    setEmotion('curious');addMsg('user',text);showTyping();
+    var fd=new FormData();
+    fd.append('audio',new Blob([new Uint8Array(500)],{type:'audio/webm'}),'empty.webm');
+    fd.append('text',text);
+    fetch(API+'/qa/ask',{method:'POST',body:fd}).then(function(r){return r.json()}).then(function(res){
+      hideTyping();var d=(res&&res.data)||{};var a=d.answer_text||'sorry...';
+      addMsg('assistant',a);setEmotion('happy');
+      isThinking=false;
+      $inp.disabled=false;$voice.disabled=false;updateSendBtn();
+      startSpeakWithDuration(a,d.answer_audio_base64);
+    }).catch(function(e){console.error(e);addMsg('assistant','network error...');resetAfterSpeak()});
+  }
+
+  function sendAudio(blob){
+    isThinking=true;$inp.disabled=true;$voice.disabled=true;$send.disabled=true;
+    setEmotion('curious');
+    var fname=(blob.type==='audio/wav')?'recording.wav':'recording.webm';
+    var fd=new FormData();fd.append('audio',blob,fname);
+    fetch(API+'/qa/ask',{method:'POST',body:fd}).then(function(r){return r.json()}).then(function(res){
+      hideTyping();var d=(res&&res.data)||{};var q=d.question_text||'';var a=d.answer_text||'sorry...';
+      addMsg('user',q||'(voice)');addMsg('assistant',a);setEmotion('happy');
+      isThinking=false;
+      $inp.disabled=false;$voice.disabled=false;updateSendBtn();
+      startSpeakWithDuration(a,d.answer_audio_base64);
+    }).catch(function(e){console.error(e);addMsg('assistant','network error...');resetAfterSpeak()});
+  }
+
+  function _speakBrowserTTS(text){
+    if(!window.speechSynthesis){
+      var ms=Math.max(1500,text.length*250);
+      if(_speakTimer)clearTimeout(_speakTimer);
+      _speakTimer=setTimeout(resetAfterSpeak,ms);
+      return;
+    }
+    speechSynthesis.cancel();
+    var u=new SpeechSynthesisUtterance(text);
+    u.lang='zh-CN';u.rate=1.0;u.pitch=1.1;u.volume=1;
+    u.onend=function(){resetAfterSpeak()};
+    u.onerror=function(){resetAfterSpeak()};
+    var voices=speechSynthesis.getVoices();
+    if(voices.length===0){
+      speechSynthesis.onvoiceschanged=function(){
+        var v2=speechSynthesis.getVoices();
+        var zh=v2.find(function(vo){return vo.lang.indexOf('zh')===0});
+        if(zh)u.voice=zh;
+        speechSynthesis.speak(u);
+      };
+    }else{
+      var zh=voices.find(function(vo){return vo.lang.indexOf('zh')===0});
+      if(zh)u.voice=zh;
+      speechSynthesis.speak(u);
+    }
+  }
+  var _speakTimer=null;
+
+  function resetAfterSpeak(){
+    if(_speakTimer){clearTimeout(_speakTimer);_speakTimer=null}
+    if(_audioEl){_audioEl.pause();_audioEl=null}
+    stopSpeak();setEmotion('neutral');
+    isThinking=false;
+    $inp.disabled=false;$voice.disabled=false;updateSendBtn();
+  }
+
+  // 小程序可调用此方法注入 QA 结果
+  window._onQAResult=function(data){
+    hideTyping();if(data.question)addMsg('user',data.question);
+    if(data.answer){
+      addMsg('assistant',data.answer);setEmotion('happy');
+      startSpeakWithDuration(data.answer,data.answer_audio_base64);
+    }
+    isThinking=false;
+    $inp.disabled=false;$voice.disabled=false;updateSendBtn();
+  };
+
+  // 监听 hash 变化(小程序通过修改 web-view src#hash 回传结果)
+  var _lastHash='';
+  function checkHash(){
+    var h=window.location.hash;
+    if(h!==_lastHash&&h.indexOf('#qa=')===0){
+      _lastHash=h;
+      try{
+        var json=decodeURIComponent(h.substring(4));
+        var data=JSON.parse(json);
+        window._onQAResult({
+          question:data.question_text||'',
+          answer:data.answer_text||'',
+          audioUrl:data.answer_audio_url||''
+        });
+        // 清除 hash 避免重复处理
+        history.replaceState(null,'',window.location.pathname);
+      }catch(e){console.error('hash parse error:',e)}
+    }
+  }
+  setInterval(checkHash,500);
+  window.addEventListener('hashchange',checkHash);
+
+})();
+</script>
+</body>
+</html>
