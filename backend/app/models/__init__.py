@@ -19,6 +19,7 @@ class User(Base):
     wx_unionid = Column(String(64), nullable=True)
     nickname = Column(String(64), default="")
     avatar_url = Column(String(512), default="")
+    phone = Column(String(20), nullable=True)
     created_at = Column(TIMESTAMP, default=func.now())
     last_login_at = Column(TIMESTAMP, default=func.now())
 

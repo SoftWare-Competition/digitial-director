@@ -116,6 +116,7 @@ app.add_middleware(
 
 app.mount("/static/audio", StaticFiles(directory=os.path.join(BASE_DIR, "backend", "audio")), name="static_audio")
 app.mount("/static/model", StaticFiles(directory=os.path.join(BASE_DIR, "backend", "static", "model")), name="static_model")
+app.mount("/static/avatars", StaticFiles(directory=os.path.join(BASE_DIR, "backend", "static", "avatars")), name="static_avatars")
 app.mount("/live2d-viewer/static", StaticFiles(directory=os.path.join(BASE_DIR, "build", "live2d-viewer")), name="live2d_viewer_static")
 
 from fastapi.responses import HTMLResponse
