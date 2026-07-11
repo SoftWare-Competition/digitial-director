@@ -142,6 +142,43 @@ def health():
     return {"status": "ok", "version": "0.1.0"}
 
 
+@app.post("/api/v1/admin/reseed")
+def force_reseed():
+    """强制从 JSON 重新灌入数据，会更新已有记录"""
+    db = SessionLocal()
+    try:
+        data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+        spots_path = os.path.join(data_dir, "spots.json")
+
+        with open(spots_path, "r", encoding="utf-8") as f:
+            spots_data = json.load(f)
+
+        updated = 0
+        for s in spots_data:
+            spot = db.query(ScenicSpot).filter(ScenicSpot.id == s["id"]).first()
+            if spot:
+                spot.name = s["name"]
+                spot.category = s.get("category", "")
+                spot.lat = s["lat"]
+                spot.lng = s["lng"]
+                spot.geofence_radius = s.get("geofence_radius", 30)
+                spot.scale = s.get("scale", "")
+                spot.cultural_meaning = s.get("cultural_meaning", "")
+                spot.detailed_description = s.get("detailed_description", "")
+                spot.visitor_info = s.get("visitor_info", "")
+                spot.narration_text = s.get("narration_text", "")
+                spot.is_active = s.get("is_active", 1)
+                updated += 1
+
+        db.commit()
+        return {"status": "ok", "message": f"Updated {updated} spots from spots.json"}
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.main:app", host=settings.host, port=settings.port, reload=settings.debug)
