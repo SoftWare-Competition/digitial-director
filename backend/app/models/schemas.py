@@ -18,16 +18,66 @@ class UserLoginRequest(BaseModel):
     code: str
 
 
+class WxLoginRequest(BaseModel):
+    code: str
+    nickname: Optional[str] = None
+    avatar_url: Optional[str] = None
+    phone_code: Optional[str] = None
+
+
+class WxLoginResponse(BaseModel):
+    token: str
+    is_new_user: bool
+    user: "UserProfile"
+
+
+class UserUpdateRequest(BaseModel):
+    nickname: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+
 class UserProfile(BaseModel):
     id: str
     nickname: str
     avatar_url: str = ""
+    email: str | None = None
+    username: str | None = None
 
 
 class UserLoginResponse(BaseModel):
     token: str
     is_new_user: bool
     user: UserProfile
+
+
+# --- Email login schemas ---
+class EmailSendCodeRequest(BaseModel):
+    email: str
+
+
+class EmailLoginRequest(BaseModel):
+    email: str
+    code: str
+    nickname: Optional[str] = None
+
+
+class EmailLoginResponse(BaseModel):
+    token: str
+    is_new_user: bool
+    user: UserProfile
+
+
+# --- Register / Password login schemas ---
+class RegisterRequest(BaseModel):
+    email: str
+    code: str          # 邮箱验证码
+    username: str
+    password: str
+
+
+class UsernameLoginRequest(BaseModel):
+    username: str
+    password: str
 
 
 class UserHistory(BaseModel):

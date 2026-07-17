@@ -1,4 +1,6 @@
-"""JWT authentication utilities for WeChat mini-program login."""
+"""JWT authentication utilities."""
+import hashlib
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -11,11 +13,30 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 72  # 3 days
 
 
-def create_access_token(user_id: str, openid: str) -> str:
+def hash_password(password: str) -> str:
+    """PBKDF2-SHA256 密码哈希，返回格式: salt$hash"""
+    salt = secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000)
+    return f"{salt}${h.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    """验证密码"""
+    try:
+        salt, h = stored.split("$", 1)
+        computed = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000)
+        return secrets.compare_digest(computed.hex(), h)
+    except Exception:
+        return False
+
+
+def create_access_token(user_id: str, openid: str = "", email: str = "", username: str = "") -> str:
     expire = datetime.now(timezone.utc) + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
     payload = {
         "sub": user_id,
         "openid": openid,
+        "email": email,
+        "username": username,
         "iat": datetime.now(timezone.utc),
         "exp": expire,
     }

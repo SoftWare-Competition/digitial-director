@@ -88,8 +88,55 @@ def seed_if_empty():
         db.close()
 
 
+def _migrate_schema():
+    """SQLite schema migration: add columns/tables that don't exist yet."""
+    import sqlite3
+    # Resolve relative path to absolute (same logic as SQLAlchemy)
+    db_rel = settings.database_url.replace("sqlite:///", "")
+    if not os.path.isabs(db_rel):
+        db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), db_rel)
+    else:
+        db_path = db_rel
+    print(f"[DB Migration] Using database at: {db_path}")
+    conn = sqlite3.connect(db_path)
+
+    # 1. Add email column to users if not exists
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(users)")]
+    if "email" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN email VARCHAR(128)")
+        try: conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email ON users(email)")
+        except: pass
+        print("[DB Migration] Added 'email' column to users table")
+    if "username" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN username VARCHAR(64)")
+        try: conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_username ON users(username)")
+        except: pass
+        print("[DB Migration] Added 'username' column to users table")
+    if "password_hash" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN password_hash VARCHAR(256)")
+        print("[DB Migration] Added 'password_hash' column to users table")
+
+    # 2. Create email_verification_codes table if not exists
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS email_verification_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email VARCHAR(128) NOT NULL,
+            code VARCHAR(6) NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            is_used INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_email_vc_email ON email_verification_codes(email)")
+    print("[DB Migration] email_verification_codes table ready")
+
+    conn.commit()
+    conn.close()
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
+    _migrate_schema()
     seed_if_empty()
 
 

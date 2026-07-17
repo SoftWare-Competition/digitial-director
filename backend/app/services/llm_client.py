@@ -132,7 +132,7 @@ async def chat(
 ) -> str:
     """Send message to DeepSeek and get response."""
     if not settings.deepseek_api_key:
-        return _fallback_response(user_message, spot_context)
+        return _clean_answer(_fallback_response(user_message, spot_context))
 
     knowledge_text = _retrieve_knowledge(user_message, spot_context)
 
@@ -168,10 +168,22 @@ async def chat(
                 },
             )
             result = resp.json()
-            return result["choices"][0]["message"]["content"]
+            return _clean_answer(result["choices"][0]["message"]["content"])
     except Exception as e:
         print(f"[LLM] Error: {e}")
-        return _fallback_response(user_message, spot_context)
+        return _clean_answer(_fallback_response(user_message, spot_context))
+
+
+def _clean_answer(text: str) -> str:
+    """Remove stage directions, emotes, filler from AI responses."""
+    import re
+    # Remove all content in Chinese/English parentheses that are actions/stage directions
+    # Matches: （笑）, (哈哈), （稍作停顿）, (停顿片刻), （指向大佛）, (轻咳) etc
+    action_keys = '笑|哈|呵|嘻|嘿|嗯|哦|哎|咦|呜|啦|吧|呢|呀|哼|停|顿|稍|咳|清|指|转|回|看|望|观|察|示|意|点|摇|摆|眨|叹|呼|吸|走|跑|跳|坐|站|挥|拍|鼓|掌|想|思|考|念|微|温|亲|热|冷|轻|重|快|慢|大|小|高|低|远|近|渐|缓|突|猛|忽'
+    text = re.sub(r'[（(][^）)]*?(?:' + action_keys + r')[^）)]*?[）)]', '', text)
+    # Clean up extra spaces
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 
 def _fallback_response(question: str, spot_context: str) -> str:

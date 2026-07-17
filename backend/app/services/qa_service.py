@@ -1,6 +1,8 @@
 """Q&A Pipeline: ASR -> LLM (with RAG) -> TTS."""
+import asyncio
 import json
 import os
+import time
 import uuid
 
 from sqlalchemy.orm import Session
@@ -20,15 +22,30 @@ async def process_question(
     text_override: str = None,
 ) -> dict:
     """Full Q&A pipeline. Returns dict with question_text, answer_text, etc."""
+    t0 = time.time()
 
     # Step 1: ASR (or use text override)
     if text_override:
         question_text = text_override
         confidence = 1.0
     else:
-        question_text, confidence = await speech_to_text(audio_bytes)
+        try:
+            question_text, confidence = await asyncio.wait_for(
+                speech_to_text(audio_bytes), timeout=15.0
+            )
+        except asyncio.TimeoutError:
+            print("[QA] ASR timed out after 15s")
+            question_text = "[语音识别超时]"
+            confidence = 0.0
+        except Exception as e:
+            print(f"[QA] ASR error: {e}")
+            question_text = "[语音识别异常]"
+            confidence = 0.0
         if confidence < 0.5:
             question_text = "[未能识别语音内容]"
+
+    t1 = time.time()
+    print(f"[QA] Step1 ASR: {t1-t0:.1f}s, text={question_text[:40]}")
 
     # Step 2: Find current spot context (RAG)
     spot_name = None
@@ -85,18 +102,41 @@ async def process_question(
             history.append({"role": msg.role, "text": msg.question_text or msg.answer_text})
 
     # Step 5: LLM with RAG context
-    answer_text = await llm_chat(
-        user_message=question_text,
-        spot_context=spot_context,
-        conversation_history=history,
-    )
+    try:
+        answer_text = await asyncio.wait_for(
+            llm_chat(
+                user_message=question_text,
+                spot_context=spot_context,
+                conversation_history=history,
+            ),
+            timeout=25.0,
+        )
+    except asyncio.TimeoutError:
+        print("[QA] LLM timed out after 25s")
+        answer_text = "小灵正在思考中，请稍后再试~"
+    except Exception as e:
+        print(f"[QA] LLM error: {e}")
+        answer_text = "抱歉，小灵暂时开小差了，请再问一次吧~"
+
+    t2 = time.time()
+    print(f"[QA] Step5 LLM: {t2-t1:.1f}s, answer_len={len(answer_text)}")
 
     # Step 6: TTS
     import base64
-    audio_bytes_out = await text_to_speech(answer_text)
     audio_base64 = ""
-    if audio_bytes_out:
-        audio_base64 = base64.b64encode(audio_bytes_out).decode("ascii")
+    try:
+        audio_bytes_out = await asyncio.wait_for(
+            text_to_speech(answer_text), timeout=20.0
+        )
+        if audio_bytes_out:
+            audio_base64 = base64.b64encode(audio_bytes_out).decode("ascii")
+    except asyncio.TimeoutError:
+        print("[QA] TTS timed out after 20s, returning text only")
+    except Exception as e:
+        print(f"[QA] TTS error: {e}")
+
+    t3 = time.time()
+    print(f"[QA] Step6 TTS: {t3-t2:.1f}s, audio_base64_len={len(audio_base64)}")
 
     # Save to DB
     user_msg = QAMessage(
@@ -114,6 +154,9 @@ async def process_question(
     )
     db.add_all([user_msg, assistant_msg])
     db.commit()
+
+    total = time.time() - t0
+    print(f"[QA] TOTAL pipeline: {total:.1f}s")
 
     return {
         "session_id": session.id,

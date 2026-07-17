@@ -15,8 +15,11 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(String(20), primary_key=True, default=pk)
-    wx_openid = Column(String(64), unique=True, nullable=False)
+    wx_openid = Column(String(64), unique=True, nullable=True)   # 废弃：邮箱注册用户为占位值
     wx_unionid = Column(String(64), nullable=True)
+    email = Column(String(128), unique=True, nullable=True)       # 邮箱（注册必填）
+    username = Column(String(64), unique=True, nullable=True)     # 用户名（登录用）
+    password_hash = Column(String(256), nullable=True)            # 密码哈希
     nickname = Column(String(64), default="")
     avatar_url = Column(String(512), default="")
     phone = Column(String(20), nullable=True)
@@ -151,6 +154,17 @@ class TipsLog(Base):
     created_at = Column(TIMESTAMP, default=func.now())
 
     __table_args__ = (Index("idx_tips_log_user", "user_id", "created_at"),)
+
+
+class EmailVerificationCode(Base):
+    __tablename__ = "email_verification_codes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    email = Column(String(128), nullable=False, index=True)
+    code = Column(String(6), nullable=False)
+    expires_at = Column(TIMESTAMP, nullable=False)
+    is_used = Column(Integer, default=0)
+    created_at = Column(TIMESTAMP, default=func.now())
 
 
 class WeatherCache(Base):

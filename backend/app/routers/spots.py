@@ -3,8 +3,10 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.models import ScenicSpot, Route, RouteSpot
+from app.services.baidu_map_client import plan_walking_route
 from app.models.schemas import (
     APIResponse,
     SpotBasic,
@@ -161,3 +163,20 @@ def get_route(route_id: str, db: Session = Depends(get_db)):
         spots=spots,
     )
     return APIResponse(data=detail.model_dump())
+
+@router.get("/routes/{route_id}/plan", response_model=APIResponse)
+async def plan_route(route_id: str, db: Session = Depends(get_db)):
+    if not settings.baidu_map_ak:
+        return APIResponse(code=1, message="BAIDU_MAP_AK not set", data={})
+    route = db.query(Route).filter(Route.id == route_id, Route.is_active == 1).first()
+    if not route:
+        raise HTTPException(status_code=404, detail="Route not found")
+    spots = []
+    for rs in route.route_spots:
+        s = rs.spot
+        if s:
+            spots.append({"lat": s.lat, "lng": s.lng, "name": s.name})
+    if len(spots) < 2:
+        return APIResponse(data={"polylines": [], "distance": 0, "duration": 0})
+    result = await plan_walking_route(spots)
+    return APIResponse(data=result)

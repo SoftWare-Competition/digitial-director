@@ -17,10 +17,20 @@ class Settings(BaseSettings):
 
     alibaba_access_key_id: str = ""
     alibaba_access_key_secret: str = ""
-    alibaba_tts_voice: str = "aixia"
-    alibaba_asr_model: str = "paraformer-v1"
+    alibaba_asr_appkey: str = ""
+    
 
-    hefeng_api_key: str = ""
+    seniverse_api_key: str = ""
+
+    # SMTP email configuration
+    smtp_host: str = "smtp.qq.com"
+    smtp_port: int = 587
+    smtp_username: str = "2149561658@qq.com"
+    smtp_password: str = "xseggviroxfkecgj"
+    smtp_from_name: str = "灵山AI导游"
+
+    # Baidu Maps (在 .env 中配置 BAIDU_MAP_AK=xxx)
+    baidu_map_ak: str = ""
 
     audio_base_url: str = "http://localhost:8000/static/audio"
 

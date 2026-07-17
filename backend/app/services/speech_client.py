@@ -1,17 +1,123 @@
-"""Speech services: edge-tts (TTS) + Alibaba ASR (placeholder)."""
+"""Speech services: edge-tts (TTS) + Alibaba ASR."""
 import asyncio
 import base64
+import hashlib
+import hmac
 import io
-import tempfile
+import json
 import os
+import subprocess
+import tempfile
+import time
+import uuid
+from urllib.parse import quote
+
+import httpx
+
+from app.config import settings
+
+
+# ---- Alibaba Cloud NLS token ----
+def _sign(method: str, params: dict, secret: str) -> str:
+    sorted_keys = sorted(params.keys())
+    canon = "&".join(f"{quote(k,'')}={quote(str(params[k]),'')}" for k in sorted_keys)
+    to_sign = f"{method}&{quote('/','')}&{quote(canon,'')}"
+    mac = hmac.new(f"{secret}&".encode(), to_sign.encode(), hashlib.sha1)
+    return base64.b64encode(mac.digest()).decode()
+
+
+def _get_nls_token() -> str:
+    ak_id = settings.alibaba_access_key_id
+    ak_secret = settings.alibaba_access_key_secret
+    if not ak_id or not ak_secret:
+        return ""
+    params = {
+        "AccessKeyId": ak_id, "Action": "CreateToken", "Format": "JSON",
+        "RegionId": "cn-shanghai", "SignatureMethod": "HMAC-SHA1",
+        "SignatureNonce": str(uuid.uuid4()), "SignatureVersion": "1.0",
+        "Timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "Version": "2019-02-28",
+    }
+    params["Signature"] = _sign("GET", params, ak_secret)
+    try:
+        resp = httpx.get("https://nls-meta.cn-shanghai.aliyuncs.com/", params=params, timeout=10)
+        return resp.json().get("Token", {}).get("Id", "")
+    except Exception as e:
+        print(f"[NLS] token err: {e}")
+        return ""
+
+
+_token_cache = {"v": "", "exp": 0}
+
+def _cached_token() -> str:
+    now = time.time()
+    if _token_cache["v"] and now < _token_cache["exp"]:
+        return _token_cache["v"]
+    t = _get_nls_token()
+    if t:
+        _token_cache["v"] = t
+        _token_cache["exp"] = now + 86000
+    return t
+
+
+def _convert_to_pcm(audio_bytes: bytes) -> bytes:
+    """Convert any audio format to PCM 16kHz mono via ffmpeg."""
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-i", "pipe:0", "-f", "s16le", "-acodec", "pcm_s16le",
+             "-ar", "16000", "-ac", "1", "pipe:1"],
+            input=audio_bytes,
+            capture_output=True,
+            timeout=15,
+        )
+        if proc.returncode == 0 and len(proc.stdout) > 200:
+            return proc.stdout
+    except Exception as e:
+        print(f"[ASR] ffmpeg err: {e}")
+    return b""
 
 
 async def speech_to_text(audio_bytes: bytes, audio_format: str = "mp3") -> tuple[str, float]:
-    """ASR - currently mock. Returns (text, confidence)."""
-    size = len(audio_bytes)
-    if size < 200:
+    """ASR via Alibaba Cloud NLS."""
+    if len(audio_bytes) < 200:
         return ("", 0.0)
-    # TODO: connect real ASR (Alibaba / Whisper / etc.)
+
+    appkey = settings.alibaba_asr_appkey
+    token = _cached_token()
+
+    if not token or not appkey:
+        print("[ASR] No token or appkey configured")
+        return ("[语音消息]", 0.85)
+
+    # Convert to PCM if needed
+    pcm_bytes = await asyncio.to_thread(_convert_to_pcm, audio_bytes)
+    if not pcm_bytes:
+        print("[ASR] PCM conversion failed")
+        return ("[语音消息]", 0.85)
+
+    # Send to Alibaba NLS
+    try:
+        url = "https://nls-gateway.cn-shanghai.aliyuncs.com/stream/v1/asr"
+        params = {
+            "appkey": appkey,
+            "format": "pcm",
+            "sample_rate": 16000,
+            "enable_punctuation_prediction": "true",
+            "enable_inverse_text_normalization": "true",
+        }
+        headers = {"X-NLS-Token": token, "Content-Type": "application/octet-stream"}
+        async with httpx.AsyncClient(timeout=30) as c:
+            resp = await c.post(url, params=params, content=pcm_bytes, headers=headers)
+            data = resp.json()
+            if data.get("status") == 20000000:
+                text = data.get("result", "").strip()
+                if text:
+                    print(f"[ASR] recognized: {text[:60]}")
+                    return (text, 0.95)
+            print(f"[ASR] NLS status={data.get('status')} msg={data.get('status_text','')}")
+    except Exception as e:
+        print(f"[ASR] NLS err: {e}")
+
     return ("[语音消息]", 0.85)
 
 

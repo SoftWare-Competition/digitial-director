@@ -6,3 +6,27 @@
 .env.test
 
 !.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Deployment artifacts
+deploy_*.tar.gz
+
+# Build temp
+index.html.broken
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

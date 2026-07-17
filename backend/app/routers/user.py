@@ -1,111 +1,310 @@
 import os
+import re
 import uuid
-import httpx
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.config import settings
 from app.database import get_db
-from app.models import User, Checkin, QASession, QAMessage, ScenicSpot
+from app.models import User, Checkin, QASession, QAMessage, ScenicSpot, EmailVerificationCode
 from app.models.schemas import (
     APIResponse,
-    WxLoginRequest,
-    WxLoginResponse,
     UserProfile,
     UserUpdateRequest,
     UserHistory,
     CheckinRecord,
     QASessionSummary,
+    EmailSendCodeRequest,
+    EmailLoginRequest,
+    EmailLoginResponse,
+    RegisterRequest,
+    UsernameLoginRequest,
 )
-from app.utils.auth import create_access_token, get_current_user, get_optional_user
-from app.services.wechat_client import wechat_code_to_session, exchange_phone_number
+from app.utils.auth import create_access_token, get_current_user, get_optional_user, hash_password, verify_password
+from app.services.email_client import generate_code, send_verification_email
+from datetime import timedelta as _td
+
+def _bj_time(dt):
+    """Convert UTC timestamp to Beijing time string (UTC+8)."""
+    if dt is None:
+        return ""
+    bj = dt + _td(hours=8)
+    return bj.strftime("%Y-%m-%d %H:%M:%S")
 
 # avatars 存储目录（与 main.py 中 StaticFiles mount 路径一致）
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# user.py 在 backend/app/routers/，需 4 层到项目根
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 AVATARS_DIR = os.path.join(BASE_DIR, "backend", "static", "avatars")
 
 router = APIRouter()
 
-# ---------- Login / Register ----------
+# ---------- Register ----------
 
-@router.post("/user/login", response_model=APIResponse)
-async def wx_login(req: WxLoginRequest, db: Session = Depends(get_db)):
-    """WeChat mini-program login.
+@router.post("/user/register", response_model=APIResponse)
+async def register(req: RegisterRequest, db: Session = Depends(get_db)):
+    """邮箱注册账号。
 
-    Flow:
-    1. Mini-program: wx.login() -> code
-    2. Mini-program: POST /user/login {code, nickname?, avatar_url?, phone_code?}
-    3. Backend: exchange code for openid via WeChat API
-    4. Backend: exchange phone_code for real phone number (official getPhoneNumber)
-    5. Backend: find or create user, issue JWT token
-    6. Return JWT token -> mini-program stores in storage
+    - 验证邮箱验证码
+    - 校验用户名格式（3-20位字母数字下划线）
+    - 校验密码强度（至少6位）
+    - 创建用户，返回 token
     """
-    # Step 1: Exchange code for openid (real WeChat API or dev mock)
-    wx_data = await wechat_code_to_session(req.code)
-    if not wx_data:
-        # Dev fallback: if WeChat not configured, use code prefix as mock openid
-        wx_data = {
-            "openid": f"wx_dev_{req.code[:8]}",
-            "session_key": "dev_session_key",
-            "unionid": None,
-        }
+    email = req.email.strip().lower()
+    code = req.code.strip()
+    username = req.username.strip()
+    password = req.password
 
-    openid = wx_data["openid"]
-    unionid = wx_data.get("unionid")
+    # 参数校验
+    if not re.match(r"^[一-龥a-zA-Z0-9_]{2,20}$", username):
+        raise HTTPException(status_code=400, detail="用户名需2-20位，支持中文/字母/数字/下划线")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="密码至少6位")
 
-    # Step 1.5: Exchange phone code for real phone number (official WeChat popup)
-    phone = None
-    if req.phone_code:
-        try:
-            phone = await exchange_phone_number(req.phone_code)
-        except Exception as e:
-            print(f"[Login] 手机号获取失败: {e}")
+    # 验证邮箱验证码
+    now = datetime.now(timezone.utc)
+    vc = (
+        db.query(EmailVerificationCode)
+        .filter(
+            EmailVerificationCode.email == email,
+            EmailVerificationCode.code == code,
+            EmailVerificationCode.is_used == 0,
+            EmailVerificationCode.expires_at > now,
+        )
+        .first()
+    )
+    if not vc:
+        raise HTTPException(status_code=400, detail="验证码错误或已过期")
 
-    # Step 2: Find or create user
-    user = db.query(User).filter(User.wx_openid == openid).first()
+    # 检查邮箱/用户名是否已被注册
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(status_code=400, detail="该邮箱已被注册")
+    if db.query(User).filter(User.username == username).first():
+        raise HTTPException(status_code=400, detail="该用户名已被使用")
+
+    # 标记验证码已使用
+    vc.is_used = 1
+
+    # 创建用户
+    placeholder_openid = f"em_{uuid.uuid4().hex[:16]}"
+    user = User(
+        email=email,
+        username=username,
+        password_hash=hash_password(password),
+        nickname=username,  # 默认昵称 = 用户名
+        wx_openid=placeholder_openid,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    # 签发 token
+    token = create_access_token(user_id=user.id, email=email, username=username)
+
+    return APIResponse(
+        data=EmailLoginResponse(
+            token=token,
+            is_new_user=True,
+            user=UserProfile(
+                id=user.id,
+                nickname=user.nickname,
+                avatar_url=user.avatar_url or "",
+                email=user.email,
+                username=user.username,
+            ),
+        ).model_dump()
+    )
+
+
+# ---------- Username + Password Login ----------
+
+@router.post("/user/username-login", response_model=APIResponse)
+async def username_login(req: UsernameLoginRequest, db: Session = Depends(get_db)):
+    """用户名 + 密码登录"""
+    username = req.username.strip()
+    password = req.password
+
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="用户名和密码不能为空")
+
+    user = db.query(User).filter(User.username == username).first()
+    if not user or not user.password_hash:
+        raise HTTPException(status_code=400, detail="用户名或密码错误")
+
+    if not verify_password(password, user.password_hash):
+        raise HTTPException(status_code=400, detail="用户名或密码错误")
+
+    # 更新登录时间
+    user.last_login_at = func.now()
+    db.commit()
+
+    token = create_access_token(user_id=user.id, email=user.email or "", username=username)
+
+    return APIResponse(
+        data=EmailLoginResponse(
+            token=token,
+            is_new_user=False,
+            user=UserProfile(
+                id=user.id,
+                nickname=user.nickname,
+                avatar_url=user.avatar_url or "",
+                email=user.email,
+                username=user.username,
+            ),
+        ).model_dump()
+    )
+
+
+# ---------- Email Login ----------
+
+@router.post("/user/send-code", response_model=APIResponse)
+async def send_verification_code(req: EmailSendCodeRequest, db: Session = Depends(get_db)):
+    """发送邮箱验证码。
+
+    - 60 秒内同一邮箱不可重复发送
+    - 验证码 10 分钟有效
+    - 每日每邮箱最多 10 次
+    """
+    email = req.email.strip().lower()
+
+    # 简单邮箱格式校验
+    if "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(status_code=400, detail="邮箱格式不正确")
+
+    # 60 秒发送冷却
+    one_minute_ago = datetime.now(timezone.utc) - timedelta(seconds=60)
+    recent = (
+        db.query(EmailVerificationCode)
+        .filter(
+            EmailVerificationCode.email == email,
+            EmailVerificationCode.created_at > one_minute_ago,
+        )
+        .first()
+    )
+    if recent:
+        wait_sec = 60 - int((datetime.now(timezone.utc) - recent.created_at.replace(tzinfo=timezone.utc)).total_seconds())
+        raise HTTPException(status_code=429, detail=f"发送过于频繁，请 {max(1, wait_sec)} 秒后再试")
+
+    # 每日发送次数限制
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_count = (
+        db.query(EmailVerificationCode)
+        .filter(
+            EmailVerificationCode.email == email,
+            EmailVerificationCode.created_at >= today_start,
+        )
+        .count()
+    )
+    if today_count >= 10:
+        raise HTTPException(status_code=429, detail="今日发送次数已达上限，请明日再试")
+
+    # 生成验证码
+    code = generate_code()
+
+    # 保存到数据库
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    vc = EmailVerificationCode(email=email, code=code, expires_at=expires_at)
+    db.add(vc)
+    db.commit()
+
+    # 发送邮件
+    success, msg = send_verification_email(email, code)
+    if not success:
+        raise HTTPException(status_code=500, detail=msg)
+
+    return APIResponse(data={"message": msg, "expires_in": 600})
+
+
+@router.post("/user/email-login", response_model=APIResponse)
+async def email_login(req: EmailLoginRequest, db: Session = Depends(get_db)):
+    """邮箱验证码登录。
+
+    - 验证码正确 → 查找/创建用户 → 返回 JWT token
+    - 新用户自动创建账户，nickname 取 @ 前部分
+    """
+    email = req.email.strip().lower()
+    code = req.code.strip()
+
+    if not email or not code:
+        raise HTTPException(status_code=400, detail="邮箱和验证码不能为空")
+
+    # 查找最新有效验证码
+    now = datetime.now(timezone.utc)
+    vc = (
+        db.query(EmailVerificationCode)
+        .filter(
+            EmailVerificationCode.email == email,
+            EmailVerificationCode.code == code,
+            EmailVerificationCode.is_used == 0,
+            EmailVerificationCode.expires_at > now,
+        )
+        .order_by(EmailVerificationCode.created_at.desc())
+        .first()
+    )
+
+    if not vc:
+        # 再查一下是不是验证码错误（区别于过期）
+        wrong_code = (
+            db.query(EmailVerificationCode)
+            .filter(
+                EmailVerificationCode.email == email,
+                EmailVerificationCode.is_used == 0,
+                EmailVerificationCode.expires_at > now,
+            )
+            .first()
+        )
+        if wrong_code:
+            raise HTTPException(status_code=400, detail="验证码错误，请重新输入")
+        else:
+            raise HTTPException(status_code=400, detail="验证码已过期或不存在，请重新获取")
+
+    # 标记验证码已使用
+    vc.is_used = 1
+    db.commit()
+
+    # 查找或创建用户
+    user = db.query(User).filter(User.email == email).first()
     is_new = False
 
     if not user:
-        # New user: register
-        nickname = req.nickname or f"游客{openid[-6:]}"
-        avatar_url = req.avatar_url or ""
+        # 新用户注册
+        nickname = req.nickname or email.split("@")[0]
+        # 确保昵称唯一（如果已有用户占用）
+        existing_nick = db.query(User).filter(User.nickname == nickname).first()
+        if existing_nick:
+            nickname = f"{nickname}_{email[-4:]}"
+        # 邮箱用户生成唯一 wx_openid 占位（兼容旧表 NOT NULL + UNIQUE 约束）
+        placeholder_openid = f"em_{uuid.uuid4().hex[:16]}"
         user = User(
-            wx_openid=openid,
-            wx_unionid=unionid,
+            email=email,
             nickname=nickname,
-            avatar_url=avatar_url,
-            phone=phone,
+            wx_openid=placeholder_openid,
         )
         db.add(user)
         db.commit()
         db.refresh(user)
         is_new = True
     else:
-        # Existing user: update login time and optional unionid
+        # 更新登录时间
         user.last_login_at = func.now()
-        if unionid and not user.wx_unionid:
-            user.wx_unionid = unionid
-        # Update nickname/avatar if provided
         if req.nickname:
             user.nickname = req.nickname
-        if req.avatar_url:
-            user.avatar_url = req.avatar_url
-        if phone and not user.phone:
-            user.phone = phone
         db.commit()
 
-    # Step 3: Issue JWT token
-    token = create_access_token(user_id=user.id, openid=openid)
+    # 签发 JWT
+    token = create_access_token(user_id=user.id, email=email, username=user.username or "")
 
     return APIResponse(
-        data=WxLoginResponse(
+        data=EmailLoginResponse(
             token=token,
             is_new_user=is_new,
             user=UserProfile(
                 id=user.id,
                 nickname=user.nickname,
-                avatar_url=user.avatar_url,
+                avatar_url=user.avatar_url or "",
+                email=user.email,
+                username=user.username,
             ),
         ).model_dump()
     )
@@ -128,10 +327,10 @@ async def upload_avatar(
     if ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
         raise HTTPException(status_code=400, detail="仅支持 JPG/PNG/GIF/WebP 格式")
 
-    # 限制文件大小（2MB）
+    # 限制文件大小（10MB）
     content = await file.read()
-    if len(content) > 2 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="图片大小不能超过 2MB")
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="图片大小不能超过 10MB")
 
     # 生成唯一文件名
     filename = f"avatar_{user['sub']}_{uuid.uuid4().hex[:8]}{ext}"
@@ -172,6 +371,8 @@ def get_profile(
             id=u.id,
             nickname=u.nickname,
             avatar_url=u.avatar_url,
+            email=u.email,
+            username=u.username,
         ).model_dump()
     )
 
@@ -199,6 +400,8 @@ def update_profile(
             id=u.id,
             nickname=u.nickname,
             avatar_url=u.avatar_url,
+            email=u.email,
+            username=u.username,
         ).model_dump()
     )
 
@@ -251,13 +454,13 @@ def user_history(
         data=UserHistory(
             checkins=[
                 CheckinRecord(
-                    spot_id=c.spot_id, spot_name=name, trigger_type=c.trigger_type, created_at=str(c.created_at)
+                    spot_id=c.spot_id, spot_name=name, trigger_type=c.trigger_type, created_at=_bj_time(c.created_at)
                 )
                 for c, name in checkins
             ],
             qa_sessions=[
                 QASessionSummary(
-                    session_id=s.id, spot_name=name, message_count=msg_count, created_at=str(s.created_at)
+                    session_id=s.id, spot_name=name, message_count=msg_count, created_at=_bj_time(s.created_at)
                 )
                 for s, name, msg_count in qa_sessions
             ],

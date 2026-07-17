@@ -78,6 +78,7 @@ body{
 <script>
 (function(){
   var API='/api/v1';
+  var _token='';try{var p=new URLSearchParams(window.location.search);_token=p.get('token')||''}catch(e){}
   var MODEL_URL='/static/model/model.model3.json';
   var $status=document.getElementById('status');
   var $chat=document.getElementById('chatArea');
@@ -98,12 +99,20 @@ body{
   if(typeof Live2DCubismCore==='undefined'){log('CubismCore 未加载!');return}
   if(!PIXI.live2d){log('pixi-live2d 未加载!');return}
 
+  // 移动端 WebGL 兼容性修复
+  var isMobile=/Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  if(isMobile){
+    PIXI.settings.RESOLUTION=Math.min(window.devicePixelRatio||2,2);
+    PIXI.settings.SCALE_MODE=PIXI.SCALE_MODES.LINEAR;
+  }
   try{
     app=new PIXI.Application({
       resizeTo:document.getElementById('charArea'),
-      backgroundAlpha:0,antialias:true,
-      resolution:window.devicePixelRatio||2,autoDensity:true,
-      preserveDrawingBuffer:true
+      backgroundAlpha:0,antialias:!isMobile,
+      resolution:isMobile?2:(window.devicePixelRatio||2),
+      autoDensity:true,
+      preserveDrawingBuffer:true,
+      powerPreference:'high-performance'
     });
   }catch(e){log('PIXI创建失败:'+e.message);return}
   document.getElementById('charArea').appendChild(app.view);
@@ -327,7 +336,10 @@ body{
     var fd=new FormData();
     fd.append('audio',new Blob([new Uint8Array(500)],{type:'audio/webm'}),'empty.webm');
     fd.append('text',text);
-    fetch(API+'/qa/ask',{method:'POST',body:fd}).then(function(r){return r.json()}).then(function(res){
+    fetch(API+'/qa/ask',_token?{method:'POST',body:fd,headers:{'Authorization':'Bearer '+_token}}:{method:'POST',body:fd}).then(function(r){
+      if(!r.ok){throw new Error('HTTP '+r.status)}
+      return r.json()
+    }).then(function(res){
       hideTyping();var d=(res&&res.data)||{};var a=d.answer_text||'抱歉,我暂时无法回答这个问题~';
       addMsg('assistant',a);setEmotion('happy');
       isThinking=false;
@@ -338,6 +350,7 @@ body{
 
   function startRecord(){
     if(isRecording||isThinking)return;
+    if(typeof wx!=='undefined'&&wx.miniProgram){isRecording=true;try{wx.miniProgram.postMessage({data:{type:'record_start'}})}catch(e){}return}
     isRecording=true;$voice.classList.add('recording');
     $vIcon.textContent='🔴';$vText.textContent='松开发送';
     if(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia){
@@ -356,6 +369,7 @@ body{
 
   function stopRecord(){
     if(!isRecording)return;
+    if(typeof wx!=='undefined'&&wx.miniProgram){isRecording=false;try{wx.miniProgram.postMessage({data:{type:'record_stop'}})}catch(e){}return}
     isRecording=false;$voice.classList.remove('recording');
     $vIcon.textContent='🎤';$vText.textContent='按住说话';
     if(mediaRecorder&&mediaRecorder.state==='recording'){mediaRecorder.stop();mediaRecorder=null}
@@ -373,7 +387,10 @@ body{
     isThinking=true;$inp.disabled=true;$voice.disabled=true;$send.disabled=true;
     setEmotion('curious');showTyping();
     var fd=new FormData();fd.append('audio',blob,'recording.webm');
-    fetch(API+'/qa/ask',{method:'POST',body:fd}).then(function(r){return r.json()}).then(function(res){
+    fetch(API+'/qa/ask',_token?{method:'POST',body:fd,headers:{'Authorization':'Bearer '+_token}}:{method:'POST',body:fd}).then(function(r){
+      if(!r.ok){throw new Error('HTTP '+r.status)}
+      return r.json()
+    }).then(function(res){
       hideTyping();var d=(res&&res.data)||{};var q=d.question_text||'';var a=d.answer_text||'网络开小差了~';
       if(q){addMsg('user',q)}
       addMsg('assistant',a);setEmotion(q?'happy':'concerned');
